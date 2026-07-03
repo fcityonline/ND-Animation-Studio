@@ -133,7 +133,7 @@
         /*** Navigation Styles ***/
         nav {
             width: calc(100vw - 24px);
-            height: 160px;
+            height: 96px;
             background: rgba(255, 255, 255, 0.08);
             backdrop-filter: blur(18px);
             -webkit-backdrop-filter: blur(18px);
@@ -154,7 +154,7 @@
             box-shadow: 0 14px 60px rgba(0, 0, 0, 0.22);
             background: rgba(15, 20, 38, 0.24);
             border-color: rgba(255, 255, 255, 0.16);
-            height: 100px;
+            height: 76px;
         }
 
         /* hide the word mark when nav is compact */
@@ -1717,7 +1717,7 @@
                 width: calc(100vw - 16px);
                 grid-template-columns: 1fr auto;
                 padding: 0 16px;
-                height: 100px;
+                height: 76px;
                 align-items: center;
                 top: 8px;
                 left: 8px;
@@ -2025,13 +2025,13 @@
             }
 
             #logo {
-                width: 45px;
-                height: 45px;
+                width: 40px;
+                height: 40px;
                 font-size: 18px;
             }
 
             nav {
-                height: 100px;
+                height: 70px;
             }
 
             #head-line {
@@ -3584,8 +3584,31 @@
         const bgCtx = bgCanvas.getContext('2d', { alpha: false });
         let currentFrame = 0;
         const totalFrames = 300;
-        const frameCache = {};
-        const frameLoadPromises = {};
+        const frameWidth = 1280;
+        const frameHeight = 720;
+        const frameCache = new Map();
+        const frameLoadPromises = new Map();
+        const framePrefetchQueue = [];
+        const queuedFrames = new Set();
+        const frameCacheLimit = window.matchMedia('(max-width: 767px)').matches ? 12 : 20;
+        const maxConcurrentPrefetches = 4;
+        const section00Element = document.getElementById('section00');
+        const section02Element = document.getElementById('section02');
+        let activePrefetches = 0;
+        let frameRequestSerial = 0;
+        let latestRequestedFrame = 0;
+        let frameSectionStart = 0;
+        let frameSectionEnd = 1;
+        let frameCanvasActive = false;
+        let frameDrawX = 0;
+        let frameDrawY = 0;
+        let frameDrawWidth = 0;
+        let frameDrawHeight = 0;
+
+        function refreshFrameBounds() {
+            frameSectionStart = section00Element.getBoundingClientRect().top + window.scrollY;
+            frameSectionEnd = section02Element.getBoundingClientRect().top + window.scrollY;
+        }
 
         function resizeCanvas() {
             const w = window.innerWidth;
@@ -3594,31 +3617,73 @@
             bgCanvas.height = h;
             bgCtx.imageSmoothingEnabled = true;
             bgCtx.imageSmoothingQuality = 'high';
+
+            const scale = Math.max(w / frameWidth, h / frameHeight);
+            frameDrawWidth = frameWidth * scale;
+            frameDrawHeight = frameHeight * scale;
+            frameDrawX = (w - frameDrawWidth) / 2;
+            frameDrawY = (h - frameDrawHeight) / 2;
+            refreshFrameBounds();
+
+            const cachedFrame = frameCache.get(currentFrame);
+            if (cachedFrame) {
+                bgCtx.drawImage(cachedFrame, frameDrawX, frameDrawY, frameDrawWidth, frameDrawHeight);
+            }
         }
 
         resizeCanvas();
         window.addEventListener('resize', resizeCanvas);
         window.addEventListener('orientationchange', () => {
-            setTimeout(resizeCanvas, 100);
+            setTimeout(resizeCanvas, 120);
         });
+        window.addEventListener('load', () => {
+            refreshFrameBounds();
+            updateFrame();
+        }, { once: true });
 
-        function loadFrame(frameIndex) {
-            if (frameCache[frameIndex]) return Promise.resolve(frameCache[frameIndex]);
-            if (frameLoadPromises[frameIndex]) return frameLoadPromises[frameIndex];
+        function getCachedFrame(frameIndex) {
+            const image = frameCache.get(frameIndex);
+            if (!image) return null;
 
-            frameLoadPromises[frameIndex] = new Promise((resolve) => {
+            frameCache.delete(frameIndex);
+            frameCache.set(frameIndex, image);
+            return image;
+        }
+
+        function cacheFrame(frameIndex, image) {
+            if (frameCache.has(frameIndex)) frameCache.delete(frameIndex);
+            frameCache.set(frameIndex, image);
+
+            while (frameCache.size > frameCacheLimit) {
+                const oldestFrame = frameCache.keys().next().value;
+                if (oldestFrame === latestRequestedFrame && frameCache.size > 1) {
+                    const currentImage = frameCache.get(oldestFrame);
+                    frameCache.delete(oldestFrame);
+                    frameCache.set(oldestFrame, currentImage);
+                    continue;
+                }
+                frameCache.delete(oldestFrame);
+            }
+        }
+
+        function loadFrame(frameIndex, priority = 'auto') {
+            const cachedFrame = getCachedFrame(frameIndex);
+            if (cachedFrame) return Promise.resolve(cachedFrame);
+            if (frameLoadPromises.has(frameIndex)) return frameLoadPromises.get(frameIndex);
+
+            const loadPromise = new Promise((resolve) => {
                 const img = new Image();
                 img.crossOrigin = 'anonymous';
                 img.decoding = 'async';
-                if (frameIndex === 0) img.fetchPriority = 'high';
+                img.fetchPriority = frameIndex === 0 ? 'high' : priority;
                 const frameNum = String(frameIndex).padStart(6, '0');
                 const webpSource = `frames_webp/frame_${frameNum}.webp`;
                 const pngFallback = `frames_24fps/frame_${frameNum}.png`;
                 let fallbackRequested = false;
 
                 img.onload = () => {
-                    frameCache[frameIndex] = img;
-                    delete frameLoadPromises[frameIndex];
+                    cacheFrame(frameIndex, img);
+                    frameLoadPromises.delete(frameIndex);
                     resolve(img);
                 };
 
@@ -3629,30 +3694,67 @@
                         return;
                     }
 
-                    delete frameLoadPromises[frameIndex];
+                    frameLoadPromises.delete(frameIndex);
                     resolve(null);
                 };
 
                 img.src = webpSource;
             });
 
-            return frameLoadPromises[frameIndex];
+            frameLoadPromises.set(frameIndex, loadPromise);
+            return loadPromise;
+        }
+
+        function renderFrame(image) {
+            bgCtx.drawImage(image, frameDrawX, frameDrawY, frameDrawWidth, frameDrawHeight);
         }
 
         async function drawFrame(frameIndex) {
-            const img = await loadFrame(frameIndex);
-            if (img) {
-                const scale = Math.max(
-                    bgCanvas.width / img.width,
-                    bgCanvas.height / img.height
-                );
+            latestRequestedFrame = frameIndex;
+            const requestSerial = ++frameRequestSerial;
+            const image = await loadFrame(frameIndex, 'high');
 
-                const x = (bgCanvas.width - img.width * scale) / 2;
-                const y = (bgCanvas.height - img.height * scale) / 2;
-
-                bgCtx.clearRect(0, 0, bgCanvas.width, bgCanvas.height);
-                bgCtx.drawImage(img, x, y, img.width * scale, img.height * scale);
+            if (!image || requestSerial !== frameRequestSerial || frameIndex !== latestRequestedFrame) {
+                return false;
             }
+
+            renderFrame(image);
+            return true;
+        }
+
+        function processFramePrefetchQueue() {
+            while (activePrefetches < maxConcurrentPrefetches && framePrefetchQueue.length) {
+                const frameIndex = framePrefetchQueue.shift();
+                queuedFrames.delete(frameIndex);
+
+                if (frameCache.has(frameIndex) || frameLoadPromises.has(frameIndex)) continue;
+
+                activePrefetches += 1;
+                loadFrame(frameIndex, 'low').finally(() => {
+                    activePrefetches -= 1;
+                    processFramePrefetchQueue();
+                });
+            }
+        }
+
+        function queueFramePrefetch(frameIndex) {
+            if (frameIndex < 0 || frameIndex >= totalFrames) return;
+            if (frameCache.has(frameIndex) || frameLoadPromises.has(frameIndex) || queuedFrames.has(frameIndex)) return;
+
+            queuedFrames.add(frameIndex);
+            framePrefetchQueue.push(frameIndex);
+            processFramePrefetchQueue();
+        }
+
+        function prefetchAroundFrame(frameIndex, direction) {
+            framePrefetchQueue.length = 0;
+            queuedFrames.clear();
+
+            const offsets = direction >= 0
+                ? [1, 2, 3, 4, 5, 6, 8, 10, -1, -2]
+                : [-1, -2, -3, -4, -5, -6, -8, -10, 1, 2];
+
+            offsets.forEach(offset => queueFramePrefetch(frameIndex + offset));
         }
 
         let ticking = false;
@@ -3662,22 +3764,22 @@
             return 1 - Math.pow(1 - t, 3);
         }
 
+        function setFrameCanvasActive(active) {
+            if (active === frameCanvasActive) return;
+            frameCanvasActive = active;
+            bgCanvas.classList.toggle('active', active);
+        }
+
         function updateFrame() {
-            const section00Top = $('#section00').offset().top;
-            const section02Top = $('#section02').offset().top;
-            const frameEndTop = section02Top;
-            const windowScrollTop = $(window).scrollTop();
+            const windowScrollTop = window.scrollY || window.pageYOffset;
 
             // Check if we're in section 00 or 01 (animation plays through both sections)
-            const isSection01Active = windowScrollTop >= section00Top - 100 && windowScrollTop < frameEndTop - 100;
+            const isSection01Active = windowScrollTop >= frameSectionStart - 100 && windowScrollTop < frameSectionEnd - 100;
+            setFrameCanvasActive(isSection01Active);
 
             if (isSection01Active) {
-                $('#bgCanvas').addClass('active');
-                
-                const sectionStart = section00Top;
-                const sectionEnd = frameEndTop;
-                const sectionHeight = sectionEnd - sectionStart;
-                const scrollInSection = Math.max(0, windowScrollTop - sectionStart);
+                const sectionHeight = Math.max(1, frameSectionEnd - frameSectionStart);
+                const scrollInSection = Math.max(0, windowScrollTop - frameSectionStart);
                 const scrollPercent = Math.min(1, scrollInSection / sectionHeight);
                 const easedPercent = easeOutCubic(scrollPercent);
 
@@ -3685,12 +3787,12 @@
                 const newFrame = Math.round(frameFloat);
 
                 if (newFrame !== lastDisplayedFrame) {
+                    const direction = newFrame > lastDisplayedFrame ? 1 : -1;
                     currentFrame = Math.max(0, Math.min(newFrame, totalFrames - 1));
                     drawFrame(currentFrame);
-                    lastDisplayedFrame = newFrame;
+                    prefetchAroundFrame(currentFrame, direction);
+                    lastDisplayedFrame = currentFrame;
                 }
-            } else {
-                $('#bgCanvas').removeClass('active');
             }
 
             ticking = false;
@@ -3710,10 +3812,11 @@
             }
         }, { passive: true });
 
-        // Render the opening frame first; warm a few key frames only when the browser is idle.
-        async function preloadFrames() {
-            const framesToPreload = [75, 150, 225, 299];
-            await Promise.all(framesToPreload.map(loadFrame));
+        // Render frame zero first, then prepare the opening scroll range in the background.
+        function warmOpeningFrames() {
+            for (let frameIndex = 1; frameIndex <= 12; frameIndex += 1) {
+                queueFramePrefetch(frameIndex);
+            }
         }
 
         drawFrame(0).then(() => {
@@ -3723,8 +3826,10 @@
                 ? callback => window.requestIdleCallback(callback, { timeout: 2500 })
                 : callback => window.setTimeout(callback, 500);
 
-            schedulePreload(preloadFrames);
+            schedulePreload(warmOpeningFrames);
         });
+
+        updateFrame();
 
         // === Hyper-scroll 3D world ===
         const CONFIG = {
