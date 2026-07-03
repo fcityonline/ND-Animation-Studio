@@ -1,0 +1,11 @@
+# Original lossless frame sequence (local master/fallback only)
+frames_24fps/
+
+# Source and experimental assets not used by the deployed website
+exxx/
+
+# Local development files
+__pycache__/
+*.py[cod]
+Thumbs.db
+.DS_Store

@@ -3585,6 +3585,7 @@
         let currentFrame = 0;
         const totalFrames = 300;
         const frameCache = {};
+        const frameLoadPromises = {};
 
         function resizeCanvas() {
             const w = window.innerWidth;
@@ -3602,24 +3603,40 @@
         });
 
         function loadFrame(frameIndex) {
-            return new Promise((resolve) => {
-                if (frameCache[frameIndex]) {
-                    resolve(frameCache[frameIndex]);
-                    return;
-                }
+            if (frameCache[frameIndex]) return Promise.resolve(frameCache[frameIndex]);
+            if (frameLoadPromises[frameIndex]) return frameLoadPromises[frameIndex];
 
+            frameLoadPromises[frameIndex] = new Promise((resolve) => {
                 const img = new Image();
                 img.crossOrigin = 'anonymous';
+                img.decoding = 'async';
+                if (frameIndex === 0) img.fetchPriority = 'high';
+                const frameNum = String(frameIndex).padStart(6, '0');
+                const webpSource = `frames_webp/frame_${frameNum}.webp`;
+                const pngFallback = `frames_24fps/frame_${frameNum}.png`;
+                let fallbackRequested = false;
+
                 img.onload = () => {
                     frameCache[frameIndex] = img;
+                    delete frameLoadPromises[frameIndex];
                     resolve(img);
                 };
+
                 img.onerror = () => {
+                    if (!fallbackRequested) {
+                        fallbackRequested = true;
+                        img.src = pngFallback;
+                        return;
+                    }
+
+                    delete frameLoadPromises[frameIndex];
                     resolve(null);
                 };
-                const frameNum = String(frameIndex).padStart(6, '0');
-                img.src = `frames_24fps/frame_${frameNum}.png`;
+
+                img.src = webpSource;
             });
+
+            return frameLoadPromises[frameIndex];
         }
 
         async function drawFrame(frameIndex) {
@@ -3693,17 +3710,20 @@
             }
         }, { passive: true });
 
-        // Preload frames
+        // Render the opening frame first; warm a few key frames only when the browser is idle.
         async function preloadFrames() {
-            const framesToPreload = [0, 75, 150, 225, 299];
-            for (const frame of framesToPreload) {
-                await loadFrame(frame);
-            }
+            const framesToPreload = [75, 150, 225, 299];
+            await Promise.all(framesToPreload.map(loadFrame));
         }
 
-        preloadFrames().then(() => {
-            drawFrame(0);
+        drawFrame(0).then(() => {
             console.log('Animation ready. Total frames: ' + totalFrames);
+
+            const schedulePreload = window.requestIdleCallback
+                ? callback => window.requestIdleCallback(callback, { timeout: 2500 })
+                : callback => window.setTimeout(callback, 500);
+
+            schedulePreload(preloadFrames);
         });
 
         // === Hyper-scroll 3D world ===
